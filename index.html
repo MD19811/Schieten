@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Precision Shooting Target Game</title>
+    <style>
+        body {
+            margin: 0;
+            background: #111;
+            color: #fff;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            overflow: hidden;
+            user-select: none;
+        }
+        #gameContainer {
+            position: relative;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            border-radius: 8px;
+            overflow: hidden;
+            background: #222;
+        }
+        canvas {
+            display: block;
+        }
+        #instructions {
+            margin-top: 15px;
+            text-align: center;
+            font-size: 14px;
+            color: #aaa;
+            max-width: 600px;
+            line-height: 1.5;
+        }
+        .key {
+            background: #333;
+            padding: 2px 6px;
+            border-radius: 4px;
+            color: #fff;
+            border: 1px solid #555;
+        }
+        /* Fullscreen handling for the hidden temporary image presentation container */
+        #rewardImgContainer:fullscreen {
+            display: flex !important;
+            align-items: center;
+            justify-content: center;
+            background: #000;
+            width: 70vw;
+            height: 100vh;
+        }
+        #rewardImgContainer:fullscreen img {
+            max-width: 70vw;
+            max-height: 100vh;
+            object-fit: contain;
+        }
+    </style>
+</head>
+<body>
+
+<div id="gameContainer">
+    <canvas id="gameCanvas" width="800" height="800"></canvas>
+</div>
+
+<div id="rewardImgContainer" style="display: none;">
+    <img id="fullscreenTargetImg" src="" alt="Reward Summary">
+</div>
+
+<div id="instructions">
+    <p>
+        <span class="key">Move Mouse</span> to Aim |
+        <span class="key">Hold Spacebar</span> to Hold Breath |
+        <span class="key">Left Click</span> to Shoot (30s Time Limit!)
+    </p>
+</div>
+
+<script>
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const gameContainer = document.getElementById('gameContainer');
+const rewardImgContainer = document.getElementById('rewardImgContainer');
+const fullscreenTargetImg = document.getElementById('fullscreenTargetImg');
+
+// Game state variables
+let shotsLeft = 10;
+let lastShotScore = null;
+let totalScore = 0.00;
+let gameOver = false;
+let gameOverReason = "";
+let shotsHistory = [];
+
+// Timing
+let timeLeft = 30.00;
+let lastFrameTime = performance.now();
+
+// Reward Image Handling
+let rewardImage = null;
+let rewardImageLoaded = false;
+
+// Coordinates for the dynamic canvas button bounding box
+let btnX = 310;
+let btnY = 332;
+let btnW = 180;
+let btnH = 32;
+
+// Mouse tracking
+let mouseX = Math.random() * (canvas.width - 200) + 100;
+let mouseY = Math.random() * (canvas.height - 200) + 100;
+let rawMouseX = 0; // Track actual mouse positions for click detection adjustments
+let rawMouseY = 0;
+
+// Aim sway physics
+let swayX = 0;
+let swayY = 0;
+let time = 0;
+
+// Breath mechanics
+let breathStamina = 100.00;
+const BREATH_DRAIN_SPEED = 0.4;
+const BREATH_RECOVERY_SPEED = 0.2;
+let isHoldingBreath = false;
+let IsExhausted = false;
+
+// Configuration constants
+const TARGET_CENTER_X = canvas.width / 2;
+const TARGET_CENTER_Y = canvas.height / 2;
+const MAX_TARGET_RADIUS = 350.00;
+
+// Load Assets
+const targetImg = new Image();
+targetImg.src = 'schijf.jpg';
+
+const crosshairImg = new Image();
+crosshairImg.src = 'cross2.png';
+
+// Coordinate conversion helper to handle cross-browser canvas scaling accurately
+function getCanvasMousePos(e) {
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    return {
+        x: (e.clientX - rect.left) * scaleX,
+        y: (e.clientY - rect.top) * scaleY
+    };
+}
+
+// Handle Mouse Movement
+canvas.addEventListener('mousemove', (e) => {
+    const pos = getCanvasMousePos(e);
+    mouseX = pos.x;
+    mouseY = pos.y;
+    rawMouseX = pos.x;
+    rawMouseY = pos.y;
+
+    // Dynamically alter layout cursor style when hovering over the custom canvas button
+    if (gameOver && totalScore >= 99.00 && rewardImageLoaded) {
+        if (rawMouseX >= btnX && rawMouseX <= btnX + btnW && rawMouseY >= btnY && rawMouseY <= btnY + btnH) {
+            canvas.style.cursor = 'pointer';
+            return;
+        }
+    }
+    canvas.style.cursor = gameOver ? 'default' : 'none';
+});
+
+// Handle Spacebar (Hold Breath)
+window.addEventListener('keydown', (e) => {
+    if (e.code === 'Space' && !IsExhausted) {
+        isHoldingBreath = true;
+        e.preventDefault();
+    }
+});
+
+window.addEventListener('keyup', (e) => {
+    if (e.code === 'Space') {
+        isHoldingBreath = false;
+    }
+});
+
+// Handle Shooting and UI Click Coordinates
+canvas.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+
+    if (gameOver) {
+        // If reward picture is active, intercept clicks targeting the Fullscreen Button bounds
+        if (totalScore >= 99.00 && rewardImageLoaded) {
+            if (rawMouseX >= btnX && rawMouseX <= btnX + btnW && rawMouseY >= btnY && rawMouseY <= btnY + btnH) {
+                // Request Fullscreen on the reward buffer
+                fullscreenTargetImg.src = rewardImage.src;
+                rewardImgContainer.requestFullscreen().catch(err => {
+                    alert(`Error enabling image fullscreen: ${err.message}`);
+                });
+                return;
+            }
+        }
+        resetGame();
+        return;
+    }
+
+    if (shotsLeft > 0 && timeLeft > 0) {
+        const pos = getCanvasMousePos(e);
+        mouseX = pos.x;
+        mouseY = pos.y;
+
+        const shotX = mouseX + swayX;
+        const shotY = mouseY + swayY;
+
+        const dist = Math.hypot(shotX - TARGET_CENTER_X, shotY - TARGET_CENTER_Y);
+        let points = 0.00;
+
+        if (dist <= MAX_TARGET_RADIUS) {
+            points = 10.00 - (dist / MAX_TARGET_RADIUS) * 9.00;
+            points = Math.min(10.00, Math.max(1.00, points));
+        } else {
+            points = 0.00;
+        }
+
+        points = Math.round(points * 100) / 100;
+        lastShotScore = points;
+        totalScore += points;
+        shotsLeft--;
+
+        shotsHistory.push({ x: shotX, y: shotY, score: points });
+
+        if (shotsLeft === 0) {
+            triggerGameOver("COMPLETED");
+        } else {
+            mouseX = Math.random() * (canvas.width - 200) + 100;
+            mouseY = Math.random() * (canvas.height - 200) + 100;
+            isHoldingBreath = false;
+        }
+    }
+});
+
+function triggerGameOver(reason) {
+    gameOver = true;
+    gameOverReason = reason;
+    canvas.style.cursor = 'default';
+
+    if (totalScore >= 99.00) {
+        const randomNum = Math.floor(Math.random() * 200) + 1;
+        const paddedNum = String(randomNum).padStart(2, '0');
+
+        rewardImage = new Image();
+        rewardImage.crossOrigin = "anonymous";
+        rewardImage.src = `https://md19811.github.io/Manillen/randomM/${paddedNum}.jpg`;
+        rewardImage.onload = () => {
+            rewardImageLoaded = true;
+        };
+    }
+}
+
+function resetGame() {
+    shotsLeft = 10;
+    lastShotScore = null;
+    totalScore = 0.00;
+    timeLeft = 30.00;
+    gameOver = false;
+    gameOverReason = "";
+    shotsHistory = [];
+    breathStamina = 100.00;
+    IsExhausted = false;
+    rewardImage = null;
+    rewardImageLoaded = false;
+    mouseX = Math.random() * (canvas.width - 200) + 100;
+    mouseY = Math.random() * (canvas.height - 200) + 100;
+    canvas.style.cursor = 'none';
+    lastFrameTime = performance.now();
+}
+
+// Main Game Loop
+function updateAndRender() {
+    const now = performance.now();
+    const deltaTime = (now - lastFrameTime) / 1000;
+    lastFrameTime = now;
+
+    if (!gameOver) {
+        time += 0.05;
+        timeLeft -= deltaTime;
+        if (timeLeft <= 0) {
+            timeLeft = 0;
+            triggerGameOver("TIME_UP");
+        }
+
+        // Manage Lung Stamina Mechanics
+        if (isHoldingBreath && !IsExhausted) {
+            breathStamina -= BREATH_DRAIN_SPEED;
+            if (breathStamina <= 0) {
+                breathStamina = 0;
+                isHoldingBreath = false;
+                IsExhausted = true;
+            }
+        } else {
+            breathStamina += BREATH_RECOVERY_SPEED;
+            if (breathStamina >= 100) {
+                breathStamina = 100;
+                IsExhausted = false;
+            }
+        }
+    }
+
+    // Calculate Sway Intensity
+    let swayIntensity = 25;
+    let swaySpeed = 2.5;
+
+    if (isHoldingBreath && !gameOver) {
+        swayIntensity = 3;
+        swaySpeed = 1.0;
+    } else if (IsExhausted && !gameOver) {
+        swayIntensity = 55;
+        swaySpeed = 5.0;
+    }
+
+    if (!gameOver) {
+        swayX = Math.sin(time * swaySpeed) * swayIntensity + Math.cos(time * 0.7 * swaySpeed) * (swayIntensity * 0.4);
+        swayY = Math.cos(time * 0.9 * swaySpeed) * swayIntensity + Math.sin(time * 1.2 * swaySpeed) * (swayIntensity * 0.4);
+    }
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // Draw background Target image
+    ctx.drawImage(targetImg, 0, 0, canvas.width, canvas.height);
+
+    // Draw Previous Bullet Holes with Score Popups
+    shotsHistory.forEach(shot => {
+        ctx.beginPath();
+        ctx.arc(shot.x, shot.y, 4, 0, Math.PI * 2);
+        ctx.fillStyle = '#ff3333';
+        ctx.fill();
+        ctx.strokeStyle = '#000';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
+        ctx.font = '10px Arial';
+        ctx.fillText(shot.score.toFixed(2), shot.x + 6, shot.y - 4);
+    });
+
+    // Render Dashboard Interface Overlay
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+    ctx.fillRect(15, 15, 240, 160);
+    ctx.strokeStyle = '#444';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(15, 15, 240, 160);
+
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 15px Arial';
+    ctx.fillText(`Shots Remaining: ${shotsLeft}`, 30, 40);
+
+    ctx.fillStyle = timeLeft < 6 ? '#ff3333' : '#fff';
+    ctx.fillText(`Time Left: ${timeLeft.toFixed(2)}s`, 30, 62);
+
+    ctx.fillStyle = '#ffcc00';
+    ctx.fillText(`Last Shot: ${lastShotScore !== null ? lastShotScore.toFixed(2) : '---'}`, 30, 85);
+
+    ctx.fillStyle = '#fff';
+    ctx.fillText(`Total Score: ${totalScore.toFixed(2)}`, 30, 108);
+
+    // Oxygen Stamina Bar Display
+    let barColor = '#33ccff';
+    let statusText = 'SPACE TO HOLD BREATH';
+    if (isHoldingBreath) statusText = 'HOLDING BREATH...';
+    if (IsExhausted) {
+        barColor = '#ff3333';
+        statusText = 'OUT OF BREATH!';
+    }
+
+    ctx.fillStyle = '#aaa';
+    ctx.font = '11px Arial';
+    ctx.fillText(statusText, 30, 134);
+
+    ctx.fillStyle = '#222';
+    ctx.fillRect(30, 142, 200, 12);
+    ctx.fillStyle = barColor;
+    ctx.fillRect(30, 142, breathStamina * 2, 12);
+
+    // Game Over Panel Layout
+    if (gameOver) {
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.9)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // Render the unlocked random reward photo if criteria met
+        if (totalScore >= 99.00 && rewardImageLoaded) {
+            const imgW = 240;
+            const imgH = 280;
+            ctx.drawImage(rewardImage, canvas.width / 2 - imgW / 2, 45, imgW, imgH);
+            ctx.strokeStyle = '#ffcc00';
+            ctx.lineWidth = 3;
+            ctx.strokeRect(canvas.width / 2 - imgW / 2, 45, imgW, imgH);
+
+            // Draw Fullscreen Button under the picture dynamically inside the Canvas view
+            let isHovered = (rawMouseX >= btnX && rawMouseX <= btnX + btnW && rawMouseY >= btnY && rawMouseY <= btnY + btnH);
+            ctx.fillStyle = isHovered ? '#333' : '#222';
+            ctx.strokeStyle = isHovered ? '#ffcc00' : '#555';
+            ctx.lineWidth = 2;
+
+            // Draw Button Base
+            ctx.fillRect(btnX, btnY, btnW, btnH);
+            ctx.strokeRect(btnX, btnY, btnW, btnH);
+
+            // Draw Button Label Text
+            ctx.fillStyle = '#fff';
+            ctx.font = 'bold 13px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillText('Show Fullscreen', btnX + btnW / 2, btnY + 20);
+        }
+
+        ctx.fillStyle = '#fff';
+        ctx.textAlign = 'center';
+
+        ctx.font = 'bold 40px Arial';
+        const titleY = (totalScore >= 99.00) ? 415 : 150;
+        ctx.fillText(gameOverReason === "TIME_UP" ? 'TIME EXPIRED!' : 'ROUND COMPLETE', canvas.width / 2, titleY);
+
+        ctx.font = '28px Arial';
+        ctx.fillStyle = totalScore >= 99.00 ? '#ffcc00' : '#fff';
+        ctx.fillText(`Final Score: ${totalScore.toFixed(2)} / 100.00`, canvas.width / 2, titleY + 45);
+
+        ctx.font = '14px Arial';
+        ctx.fillStyle = '#888';
+        ctx.fillText('Click anywhere outside buttons to try again', canvas.width / 2, titleY + 75);
+
+        // Render detailed shot log rows summary
+        ctx.textAlign = 'left';
+        ctx.fillStyle = 'rgba(255,255,255,0.06)';
+        const logBoxY = titleY + 100;
+        ctx.fillRect(180, logBoxY, 440, 220);
+        ctx.strokeStyle = '#333';
+        ctx.strokeRect(180, logBoxY, 440, 220);
+
+        ctx.font = 'bold 14px Arial';
+        ctx.fillStyle = '#aaa';
+        ctx.fillText('SHOT LOG SUMMARY', 200, logBoxY + 25);
+
+        ctx.font = '13px Courier New';
+        ctx.fillStyle = '#ddd';
+
+        for (let i = 0; i < 10; i++) {
+            const rowX = i < 5 ? 200 : 420;
+            const rowY = logBoxY + 60 + (i % 5) * 30;
+
+            if (shotsHistory[i]) {
+                const s = shotsHistory[i];
+                ctx.fillText(`Shot ${i+1}:  [${s.score.toFixed(2)} pts]`, rowX, rowY);
+            } else {
+                ctx.fillStyle = '#555';
+                ctx.fillText(`Shot ${i+1}:  ---`, rowX, rowY);
+                ctx.fillStyle = '#ddd';
+            }
+        }
+    } else {
+        // Draw Target Crosshair
+        const currentCrosshairX = mouseX + swayX;
+        const currentCrosshairY = mouseY + swayY;
+
+        const size = 64;
+        ctx.drawImage(
+            crosshairImg,
+            currentCrosshairX - size / 2,
+            currentCrosshairY - size / 2,
+            size,
+            size
+        );
+    }
+
+    requestAnimationFrame(updateAndRender);
+}
+
+// Asset preloading initialization sequence
+let assetsLoaded = 0;
+function checkAssets() {
+    assetsLoaded++;
+    if (assetsLoaded === 2) {
+        requestAnimationFrame(updateAndRender);
+    }
+}
+targetImg.onload = checkAssets;
+crosshairImg.onload = checkAssets;
+</script>
+
+</body>
+</html>
